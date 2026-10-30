@@ -1,17 +1,20 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useState } from "react";
-import { View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { Platform, View } from "react-native";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { AppText as Text } from "../../components/ui/AppText";
 import { PullRequestCardGroup, PullRequestCardRow } from "./PullRequestControls";
 import { pullRequestStatus } from "./pullRequestStatus";
 import type { PullRequestParams } from "./usePullRequestDiff";
 import type { PullRequestStackState } from "./usePullRequestStack";
+import { PullRequestGlyph } from "./pullRequestGlyphs";
 
 export function PullRequestStackCard(props: {
   readonly params: PullRequestParams;
   readonly state: PullRequestStackState;
 }) {
   const navigation = useNavigation();
+  const selectDetail = useSelectWorkspaceDetail();
   const [expanded, setExpanded] = useState(false);
   const stack = props.state.stack;
   if (!stack) {
@@ -24,7 +27,7 @@ export function PullRequestStackCard(props: {
       <PullRequestCardGroup>
         <PullRequestCardRow
           title="Stack"
-          icon="square.3.layers.3d"
+          icon={PullRequestGlyph.stack}
           value={`${summary.position} of ${summary.size}`}
           last
         />
@@ -36,7 +39,7 @@ export function PullRequestStackCard(props: {
     <PullRequestCardGroup>
       <PullRequestCardRow
         title="Stack"
-        icon="square.3.layers.3d"
+        icon={PullRequestGlyph.stack}
         value={`${position} of ${stack.layers.length}`}
         accessibilityLabel={`Stack, ${position} of ${stack.layers.length}${props.state.isFresh ? "" : ", showing saved stack"}`}
         expanded={expanded}
@@ -52,7 +55,7 @@ export function PullRequestStackCard(props: {
               isDraft: layer.isDraft === true,
             });
             return (
-              <View key={layer.number} className={selected ? "bg-subtle-strong" : undefined}>
+              <View key={layer.number} className={selected ? "bg-thread-selected" : undefined}>
                 <PullRequestCardRow
                   title={layer.title ?? layer.headBranch}
                   icon={status.icon}
@@ -62,13 +65,12 @@ export function PullRequestStackCard(props: {
                   onPress={
                     selected
                       ? undefined
-                      : () =>
-                          navigation.dispatch(
-                            StackActions.push("PullRequest", {
-                              ...props.params,
-                              number: layer.number,
-                            }),
-                          )
+                      : () => {
+                          const params = { ...props.params, number: layer.number };
+                          if (Platform.OS === "android")
+                            selectDetail({ name: "PullRequest", params });
+                          else navigation.dispatch(StackActions.push("PullRequest", params));
+                        }
                   }
                   last={index === stack.layers.length - 1}
                 />

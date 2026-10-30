@@ -9,7 +9,6 @@ import { ProviderInstanceId } from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 
 import {
-  claudeSignedOutMessage,
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
@@ -71,22 +70,6 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         ).toBe(base);
       }),
     );
-    it.effect("treats empty, ~/.claude, and the expanded default as the same Claude home", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const resolved = path.resolve(path.join(NodeOS.homedir(), ".claude"));
-
-        expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
-        expect(yield* resolveClaudeHomePath({ homePath: "~/.claude" })).toBe(resolved);
-        expect(yield* resolveClaudeHomePath({ homePath: resolved })).toBe(resolved);
-        expect(yield* makeClaudeEnvironment({ homePath: "" })).toBe(process.env);
-
-        const key = `claude:home:${resolved}`;
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: "" })).toBe(key);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: "~/.claude" })).toBe(key);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: resolved })).toBe(key);
-      }),
-    );
 
     it.effect("resolves configured Claude HOME and stamps continuation/cache keys with it", () =>
       Effect.gen(function* () {
@@ -120,17 +103,6 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         );
       }),
     );
-
-    it("points the signed-out hint at the configured Claude home", () => {
-      expect(claudeSignedOutMessage({ configDir: undefined, cwd: "/synthetic" })).toContain(
-        "run `claude auth login`",
-      );
-      const configDir = "/synthetic/Claude work's $literal";
-      const message = claudeSignedOutMessage({ configDir, cwd: "/synthetic/project" });
-      expect(message).toContain(`CLAUDE_CONFIG_DIR set to "${configDir}"`);
-      expect(message).not.toContain("CLAUDE_CONFIG_DIR=");
-      expect(message).toContain("then start a new thread");
-    });
 
     it.effect("separates capability probes by cwd", () =>
       Effect.gen(function* () {

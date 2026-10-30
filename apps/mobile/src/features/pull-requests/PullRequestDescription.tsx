@@ -5,13 +5,13 @@ import {
   PullRequestMediaContext,
 } from "./PullRequestMedia";
 import { PullRequestSectionHeading } from "./PullRequestSectionHeading";
-import { useContext, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { useContext, useMemo, useState, type ReactNode } from "react";
+import { Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import { pullRequestImageSource } from "./pullRequestMediaSource";
 import { parseMarkdownDocument } from "../../lib/markdownDocument";
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { FilePreviewItem } from "../../components/FilePreviewModal";
 import { isBotBadgeImage } from "./botBadgeImages";
@@ -25,11 +25,13 @@ export function PullRequestDescription(props: {
   readonly onCollapse: () => void;
   readonly expanded: boolean;
   readonly onExpandedChange: (expanded: boolean) => void;
+  readonly footer?: ReactNode;
 }) {
   const { expanded, onExpandedChange } = props;
   const [bodyHeight, setBodyHeight] = useState(0);
   const mediaContext = useContext(PullRequestMediaContext);
   const { themeVariables: colors } = useAppearancePreferences();
+  const fadeColor = colors[Platform.OS === "android" ? "--color-sheet-solid" : "--color-screen"];
   const content = useMemo(() => {
     const document = parseMarkdownDocument(props.markdown);
     const content = pullRequestDescriptionContent(document, splitPullRequestBody(props.markdown));
@@ -38,18 +40,14 @@ export function PullRequestDescription(props: {
       attachments: content.attachments.filter((attachment) => !isBotBadgeImage(attachment.uri)),
     };
   }, [props.markdown]);
-  const gallery = useMemo<FilePreviewItem[]>(
-    () =>
-      content.attachments
-        .filter((attachment) => attachment.kind === "image")
-        .map((attachment) => {
-          return {
-            ...pullRequestImageSource(attachment.uri, mediaContext),
-            name: new URL(attachment.uri).pathname.split("/").pop() || "Image",
-          };
-        }),
-    [content, mediaContext],
-  );
+  const gallery: FilePreviewItem[] = content.attachments
+    .filter((attachment) => attachment.kind === "image")
+    .map((attachment) => {
+      return {
+        ...pullRequestImageSource(attachment.uri, mediaContext),
+        name: new URL(attachment.uri).pathname.split("/").pop() || "Image",
+      };
+    });
   const canCollapse = bodyHeight > COLLAPSED_HEIGHT;
   const collapsed = canCollapse && !expanded;
   return (
@@ -64,7 +62,6 @@ export function PullRequestDescription(props: {
                 overflow: "hidden",
               }}
             >
-              {/* Measure the full body independently of the clipped viewport. */}
               <View
                 style={{ position: "absolute", top: 0, left: 0, right: 0 }}
                 onLayout={(event) => setBodyHeight(event.nativeEvent.layout.height)}
@@ -87,10 +84,10 @@ export function PullRequestDescription(props: {
                       y2="80"
                       gradientUnits="userSpaceOnUse"
                     >
-                      <Stop offset="0" stopColor={colors["--color-screen"]} stopOpacity={0} />
-                      <Stop offset="0.5" stopColor={colors["--color-screen"]} stopOpacity={0.94} />
-                      <Stop offset="0.72" stopColor={colors["--color-screen"]} stopOpacity={1} />
-                      <Stop offset="1" stopColor={colors["--color-screen"]} stopOpacity={1} />
+                      <Stop offset="0" stopColor={fadeColor} stopOpacity={0} />
+                      <Stop offset="0.5" stopColor={fadeColor} stopOpacity={0.94} />
+                      <Stop offset="0.72" stopColor={fadeColor} stopOpacity={1} />
+                      <Stop offset="1" stopColor={fadeColor} stopOpacity={1} />
                     </LinearGradient>
                   </Defs>
                   <Rect width="100%" height="100%" fill="url(#description-fade)" />
@@ -102,7 +99,7 @@ export function PullRequestDescription(props: {
                     left: 0,
                     right: 0,
                     height: 44,
-                    backgroundColor: colors["--color-screen"],
+                    backgroundColor: fadeColor,
                   }}
                 />
               </View>
@@ -137,6 +134,7 @@ export function PullRequestDescription(props: {
         ) : (
           <Text className="text-sm text-foreground-muted">No description provided.</Text>
         )}
+        {props.footer}
       </View>
       {content.attachments.length ? (
         <View className="gap-3">

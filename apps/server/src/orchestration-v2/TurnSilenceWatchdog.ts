@@ -17,18 +17,12 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 /**
- * A busy turn whose provider process stays alive but stops sending events
- * keeps its thread "working" until the user presses Stop: no terminal event
- * arrives, and the session is never idle, so idle release never fires. The
- * watchdog stops such a turn through the same `run.interrupt` path as Stop.
- *
- * No provider guarantees a heartbeat, so the default is generous. A tool
- * call (a long test suite, a subagent) can legitimately run silent for much
- * longer, so an open tool call gets its own, longer limit. A turn that waits
- * on the user (an approval or a question) is never stopped.
+ * Stops a busy turn whose live provider sends no events, through the same
+ * `run.interrupt` path as Stop. An open tool call gets a longer limit; a turn
+ * waiting on the user is never stopped.
  */
-export const DEFAULT_TURN_SILENCE_TIMEOUT_MS = 30 * 60_000;
-export const DEFAULT_TURN_SILENCE_TOOL_TIMEOUT_MS = 2 * 60 * 60_000;
+const DEFAULT_TURN_SILENCE_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_TURN_SILENCE_TOOL_TIMEOUT_MS = 2 * 60 * 60_000;
 
 export interface TurnSilenceWatchdogOptions {
   /** Silence after which a turn with no open tool call is stopped. 0 or less disables the watchdog. */
@@ -37,7 +31,7 @@ export interface TurnSilenceWatchdogOptions {
   readonly toolSilenceTimeoutMs: number;
 }
 
-export const TurnSilenceWatchdogConfig: Config.Config<TurnSilenceWatchdogOptions> = Config.all({
+const TurnSilenceWatchdogConfig: Config.Config<TurnSilenceWatchdogOptions> = Config.all({
   silenceTimeoutMs: Config.Int("T3CODE_TURN_SILENCE_TIMEOUT_MS").pipe(
     Config.withDefault(DEFAULT_TURN_SILENCE_TIMEOUT_MS),
   ),
@@ -122,7 +116,7 @@ const setOpen = (set: Set<string>, key: string, open: boolean) => {
   else set.delete(key);
 };
 
-export const makeTurnActivity = Effect.sync((): TurnActivityShape => {
+const makeTurnActivity = Effect.sync((): TurnActivityShape => {
   const turns = new Map<RunAttemptId, TrackedTurn>();
   return {
     begin: ({ threadId, runId, attemptId }) =>
@@ -202,7 +196,7 @@ export const makeTurnActivity = Effect.sync((): TurnActivityShape => {
 export const layerTurnActivity = Layer.effect(TurnActivity, makeTurnActivity);
 
 /** "30 minutes", "2 hours", "90 seconds". */
-export function formatSilence(ms: number): string {
+function formatSilence(ms: number): string {
   const plural = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
   if (ms % 3_600_000 === 0) return plural(ms / 3_600_000, "hour");
   if (ms % 60_000 === 0) return plural(ms / 60_000, "minute");
@@ -210,7 +204,7 @@ export function formatSilence(ms: number): string {
 }
 
 /** The silence limit a turn has crossed, or null while it may still be working. */
-export function silenceLimitCrossed(
+function silenceLimitCrossed(
   turn: TurnActivitySnapshot,
   nowMs: number,
   options: TurnSilenceWatchdogOptions,
@@ -220,47 +214,48 @@ export function silenceLimitCrossed(
   return nowMs - turn.lastEventAtMs >= limitMs ? limitMs : null;
 }
 
-export const makeSweep = (options: TurnSilenceWatchdogOptions) =>
-  Effect.gen(function* () {
-    const activity = yield* TurnActivity;
-    const threads = yield* ThreadManagement.ThreadManagementService;
-    return Effect.fn("TurnSilenceWatchdog.sweep")(function* () {
-      const nowMs = yield* Clock.currentTimeMillis;
-      for (const turn of yield* activity.snapshot) {
-        const limitMs = silenceLimitCrossed(turn, nowMs, options);
-        if (limitMs === null) continue;
-        const reason = `Turn stopped: no provider activity for ${formatSilence(limitMs)}${
-          turn.toolOpen ? " while a tool call was open" : ""
-        }`;
-        yield* Effect.logWarning("orchestration-v2.turn-silence-watchdog.stopping-turn", {
+const makeSweep = Effect.fn("TurnSilenceWatchdog.makeSweep")(function* (
+  options: TurnSilenceWatchdogOptions,
+) {
+  const activity = yield* TurnActivity;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  return Effect.fn("TurnSilenceWatchdog.sweep")(function* () {
+    const nowMs = yield* Clock.currentTimeMillis;
+    for (const turn of yield* activity.snapshot) {
+      const limitMs = silenceLimitCrossed(turn, nowMs, options);
+      if (limitMs === null) continue;
+      const reason = `Turn stopped: no provider activity for ${formatSilence(limitMs)}${
+        turn.toolOpen ? " while a tool call was open" : ""
+      }`;
+      yield* Effect.logWarning("orchestration-v2.turn-silence-watchdog.stopping-turn", {
+        threadId: turn.threadId,
+        runId: turn.runId,
+        silentForMs: nowMs - turn.lastEventAtMs,
+      });
+      yield* threads
+        .dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make(
+            `turn-silence-watchdog:${turn.attemptId}:${turn.lastEventAtMs}`,
+          ),
           threadId: turn.threadId,
           runId: turn.runId,
-          silentForMs: nowMs - turn.lastEventAtMs,
-        });
-        yield* threads
-          .dispatch({
-            type: "run.interrupt",
-            commandId: CommandId.make(
-              `turn-silence-watchdog:${turn.attemptId}:${turn.lastEventAtMs}`,
-            ),
-            threadId: turn.threadId,
-            runId: turn.runId,
-            reason,
-          })
-          .pipe(
-            Effect.andThen(activity.end(turn.attemptId)),
-            // Try again after another silent window, not on every tick.
-            Effect.catchCause((cause) =>
-              Effect.logWarning("orchestration-v2.turn-silence-watchdog.interrupt-failed", {
-                threadId: turn.threadId,
-                runId: turn.runId,
-                cause,
-              }).pipe(Effect.andThen(activity.touch(turn.attemptId))),
-            ),
-          );
-      }
-    });
+          reason,
+        })
+        .pipe(
+          Effect.andThen(activity.end(turn.attemptId)),
+          // Try again after another silent window, not on every tick.
+          Effect.catchCause((cause) =>
+            Effect.logWarning("orchestration-v2.turn-silence-watchdog.interrupt-failed", {
+              threadId: turn.threadId,
+              runId: turn.runId,
+              cause,
+            }).pipe(Effect.andThen(activity.touch(turn.attemptId))),
+          ),
+        );
+    }
   });
+});
 
 /** Checks open turns on the shared scheduler tick. */
 export const layer = Layer.effectDiscard(

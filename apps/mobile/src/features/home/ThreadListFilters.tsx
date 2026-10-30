@@ -1,5 +1,5 @@
 import { Pressable, ScrollView } from "react-native";
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { ListFilterMenu } from "../workspace/ListFilterMenu";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
@@ -12,7 +12,10 @@ export function ThreadListFilters(
     | "selectedProjectKey"
     | "onEnvironmentChange"
     | "onProjectChange"
-  >,
+  > & {
+    /** List padding the scroller bleeds through so pills start where row content does. */
+    readonly gutter: number;
+  },
 ) {
   const selectedEnvironment = props.environments.find(
     (environment) => environment.environmentId === props.selectedEnvironmentId,
@@ -24,7 +27,8 @@ export function ThreadListFilters(
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      contentContainerStyle={{ paddingHorizontal: 16, gap: 6, paddingBottom: 8 }}
+      style={{ marginHorizontal: -props.gutter }}
+      contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 2, paddingBottom: 10, gap: 8 }}
     >
       <ListFilterMenu
         label={selectedEnvironment?.label ?? "All environments"}
@@ -85,7 +89,7 @@ export function ThreadListFilters(
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Reset thread filters"
-          className="h-11 w-8 items-center justify-center"
+          className="h-8 w-8 items-center justify-center"
           onPress={() => {
             props.onEnvironmentChange(null);
             props.onProjectChange(null);

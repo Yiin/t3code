@@ -1,16 +1,18 @@
+import { AsyncResult } from "effect/reactivity";
 import { useAtomRefresh } from "@effect/atom-react";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { PullRequestReviewVerdict } from "@t3tools/contracts";
-import { useCallback, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
-import { Pressable, View } from "react-native";
+import { Platform, Pressable, View } from "react-native";
 import { clearSubmittedReview } from "./pullRequestReviewDrafts";
 import { usePullRequestReviewDraft } from "./usePullRequestReviewDraft";
 import { reviewPositionLabel } from "./pullRequestDiffComments";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { MaterialButton } from "../../components/MaterialButton";
-import { SegmentedControl } from "../../components/SegmentedControl";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import { SegmentedControl } from "../../components/ui/SegmentedControl";
 import { composerPullRequests } from "../../state/pull-requests";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -30,20 +32,21 @@ function useActionSubmission(params: PullRequestParams) {
     pending.current = true;
     setBusy(true);
     setError(null);
-    try {
+    const result = await settlePromise(async () => {
       await operation();
       refreshDetail();
       refreshActivity();
       navigation.goBack();
-    } catch (cause) {
+    });
+    pending.current = false;
+    setBusy(false);
+    if (AsyncResult.isFailure(result)) {
+      const cause = squashAtomCommandFailure(result);
       setError(
         cause instanceof Error
           ? cause.message
           : "The provider could not complete this action. Try again.",
       );
-    } finally {
-      pending.current = false;
-      setBusy(false);
     }
   };
   return { busy, error, submit };
@@ -65,7 +68,7 @@ export function PullRequestReviewSheet({
   const target = pullRequestTarget(params);
   const result = useEnvironmentQuery(composerPullRequests.detail(target));
   const { refresh: refreshDetail } = result;
-  useFocusEffect(useCallback(() => refreshDetail(), [refreshDetail]));
+  useFocusEffect(refreshDetail);
   const permissions = usePullRequestPermissions(params, result.data);
   const submission = useActionSubmission(params);
   const review = useAtomCommand(composerPullRequests.submitReview, { reportFailure: false });
@@ -84,12 +87,21 @@ export function PullRequestReviewSheet({
   const verdict = offered.find((option) => option.value === requestedVerdict) ?? offered[0];
   const reviewing = params.mode === "review";
   const canSubmitComments = !store.draft.comments.length || permissions.canInlineComment;
+  // Forgejo requires a summary when requesting changes, even with inline comments.
+  const summaryRequired =
+    verdict !== undefined && result.data
+      ? sourceControlClients.get(result.data.provider).reviewSummaryRequired(verdict.value)
+      : false;
   const canSubmit =
     store.ready &&
     (!reviewing || (!stale && canSubmitComments)) &&
     (reviewing
       ? verdict !== undefined &&
-        (verdict.value === "approve" || body.trim().length > 0 || store.draft.comments.length > 0)
+        (summaryRequired
+          ? body.trim().length > 0
+          : verdict.value === "approve" ||
+            body.trim().length > 0 ||
+            store.draft.comments.length > 0)
       : permissions.canComment && body.trim().length > 0);
   const perform = () =>
     submission.submit(async () => {
@@ -124,7 +136,7 @@ export function PullRequestReviewSheet({
       subtitle={`#${params.number}${reviewing && result.data?.headSha ? ` · reviewing ${result.data.headSha.slice(0, 7)}` : ` · ${params.repository}`}`}
       busy={submission.busy}
       footer={
-        <MaterialButton
+        <Button
           label={
             submission.busy
               ? "Submitting…"
@@ -137,14 +149,14 @@ export function PullRequestReviewSheet({
                 : "Post comment"
           }
           fullWidth
-          tone="contrast"
+          tone={Platform.OS === "android" ? "primary" : "contrast"}
           loading={submission.busy}
           disabled={!canSubmit || result.isPending || result.error !== null}
           onPress={() => void perform()}
         />
       }
     >
-      {reviewing && offered.length ? (
+      {reviewing && offered.length > 1 ? (
         <SegmentedControl
           options={offered.map((option) => ({ value: option.value, label: option.title }))}
           selected={verdict?.value ?? "comment"}
@@ -160,7 +172,13 @@ export function PullRequestReviewSheet({
       <TextInput
         multiline
         accessibilityLabel={reviewing ? "Review summary" : "Comment"}
-        placeholder={reviewing ? "Summarize your review…" : "Write a comment…"}
+        placeholder={
+          reviewing
+            ? summaryRequired
+              ? "Summary required to request changes…"
+              : "Summarize your review…"
+            : "Write a comment…"
+        }
         placeholderTextColorClassName="accent-foreground-muted"
         editable={store.ready && !submission.busy}
         value={body}
@@ -223,7 +241,9 @@ export function PullRequestReviewSheet({
       ) : null}
       {reviewing && !canSubmitComments ? (
         <Text className="text-sm text-danger-foreground">
-          You can no longer submit line comments on this pull request. Your drafts are kept here.
+          You can no longer submit line comments on this{" "}
+          {sourceControlClients.get(result.data?.provider).changeRequest.singular}. Your drafts are
+          kept here.
         </Text>
       ) : null}
       {submission.error || result.error || store.error ? (

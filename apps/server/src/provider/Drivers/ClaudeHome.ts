@@ -1,7 +1,7 @@
 import type {
   ClaudeSettings,
-  ProviderInstanceEnvironment,
   ProviderInstanceId,
+  ResolvedProviderInstanceEnvironment,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -35,7 +35,7 @@ export const resolveClaudeInstanceHome = Effect.fn("resolveClaudeInstanceHome")(
  * User config that every T3 account directory shares with the default Claude
  * home. Logins, account settings, and conversation state stay per account.
  */
-export const CLAUDE_SHARED_USER_CONFIG = [
+const CLAUDE_SHARED_USER_CONFIG = [
   "CLAUDE.md",
   "settings.json",
   "skills",
@@ -59,11 +59,9 @@ export const isManagedClaudeAccountHome = Effect.fn("isManagedClaudeAccountHome"
 });
 
 /**
- * Link the user config of the shared Claude home into an account directory,
- * so the account loads the same skills, agents, and settings as the CLI. A
- * real entry that the account made before it was linked moves to
- * `.t3-unshared/` instead of being deleted. An existing link is left alone.
- * Failures only log: a missing skill must not stop the account from working.
+ * Links the shared Claude home's user config into an account directory. A real
+ * entry already there moves to `.t3-unshared/`; an existing link stays. Failures
+ * only log, so a missing skill never stops the account.
  */
 export const shareClaudeUserConfig = Effect.fn("shareClaudeUserConfig")(
   function* (input: { readonly accountHomePath: string; readonly sharedHomePath: string }) {
@@ -108,8 +106,8 @@ export const shareClaudeUserConfig = Effect.fn("shareClaudeUserConfig")(
 
 export function claudeInstanceEnvironment(
   instanceId: ProviderInstanceId,
-  environment: ProviderInstanceEnvironment | undefined,
-): ProviderInstanceEnvironment {
+  environment: ResolvedProviderInstanceEnvironment | undefined,
+): ResolvedProviderInstanceEnvironment {
   if (instanceId === "claudeAgent") return environment ?? [];
   return [
     ...["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].map((name) => ({
@@ -121,13 +119,6 @@ export function claudeInstanceEnvironment(
   ];
 }
 
-/**
- * Resolve the Claude config directory the CLI would use: the instance's
- * `homePath` (exported as `CLAUDE_CONFIG_DIR`), then an inherited
- * `CLAUDE_CONFIG_DIR`, then Claude's default `~/.claude`. Empty must not
- * fall back to bare `$HOME` — that leftover from the old HOME override
- * produced a different continuation group than an explicit `~/.claude`.
- */
 export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   environment?: NodeJS.ProcessEnv,
@@ -156,14 +147,22 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   const resolvedHomePath = yield* resolveClaudeHomePath(config);
   return {
     ...resolvedBaseEnv,
-    // Isolate this instance's config via CLAUDE_CONFIG_DIR rather than HOME.
-    // Overriding HOME also relocates the macOS login keychain lookup
-    // ($HOME/Library/Keychains), so the spawned CLI can't find its stored
-    // OAuth credentials and reports "Not logged in". CLAUDE_CONFIG_DIR points
-    // Claude Code at its config dir directly while leaving HOME (and the
-    // keychain) intact.
+    // Changing HOME hides macOS Keychain credentials; use CLAUDE_CONFIG_DIR to keep login access.
     CLAUDE_CONFIG_DIR: resolvedHomePath,
   };
+});
+
+/** managed-mcp.json excludes other MCP config and forbids --strict-mcp-config; omit the flag when present. */
+export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const platform = yield* HostProcess.Platform;
+  const managedMcpConfigPath =
+    platform === "darwin"
+      ? "/Library/Application Support/ClaudeCode/managed-mcp.json"
+      : platform === "win32"
+        ? "C:\\Program Files\\ClaudeCode\\managed-mcp.json"
+        : "/etc/claude-code/managed-mcp.json";
+  return yield* fileSystem.exists(managedMcpConfigPath).pipe(Effect.orElseSucceed(() => false));
 });
 
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(
@@ -187,10 +186,7 @@ export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesC
   },
 );
 
-/**
- * Describe the spawned CLI's environment separately from the login command so
- * paths remain literal on every shell, including relative inherited values.
- */
+/** Separate spawn env from login commands to preserve literal paths, including relative inherited values. */
 export const claudeSignedOutMessage = (input: {
   readonly configDir: string | undefined;
   readonly cwd: string;
