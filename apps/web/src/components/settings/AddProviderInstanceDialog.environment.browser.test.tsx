@@ -210,23 +210,6 @@ describe("AddProviderInstanceDialog environment routing", () => {
     });
   });
 
-  it("creates a separate Claude instance before offering sign-in", async () => {
-    setup();
-    await using _screen = await render(dialog());
-    await act(async () => radio("Claude")!.click());
-    await click("Next");
-    await click("Next");
-    await click("Continue to sign-in");
-
-    expect(settingsHooks.mutate).toHaveBeenCalledWith({
-      operation: "create",
-      instanceId: "claudeAgent_2",
-      instance: { driver: "claudeAgent", enabled: true, displayName: "Claude" },
-    });
-    expect(actions.onOpenChange).not.toHaveBeenCalled();
-    expect(signInStep()?.textContent).toContain("remote-device/claudeAgent_2");
-  });
-
   it("awaits an atomic create before closing and retains prepared ACP metadata", async () => {
     setup();
     const mutation = deferred<{ readonly _tag: "Success"; readonly value: unknown }>();

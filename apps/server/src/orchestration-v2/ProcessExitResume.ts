@@ -71,6 +71,12 @@ function processExitResumeNotice(attempt: number): string {
  * that resumes the thread. Both commit with the run's terminal events, so a
  * Stop that wins the race leaves neither.
  */
+const PROCESS_EXIT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  PROVIDER_PROCESS_EXITED_CODE,
+  "process_killed_by_signal",
+  "process_exited_nonzero",
+]);
+
 export function planProcessExitResume(input: {
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly run: OrchestrationV2Run;
@@ -82,7 +88,9 @@ export function planProcessExitResume(input: {
   readonly notice: OrchestrationV2TurnItem;
   readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
 } | null {
-  if (input.failure.code !== PROVIDER_PROCESS_EXITED_CODE) return null;
+  if (input.failure.code == null || !PROCESS_EXIT_FAILURE_CODES.has(input.failure.code)) {
+    return null;
+  }
   const attempt = processExitResumeAttempt(input.run, input.completedAt);
   const message = processExitResumeNotice(attempt);
   const notice: OrchestrationV2TurnItem = {

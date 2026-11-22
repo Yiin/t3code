@@ -5,72 +5,17 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { ProviderInstanceId } from "@t3tools/contracts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
+  mergeClaudeProcessEnvironment,
   resolveClaudeHomePath,
-  resolveClaudeInstanceHome,
-  claudeInstanceEnvironment,
-  isManagedClaudeAccountHome,
-  shareClaudeUserConfig,
 } from "./ClaudeHome.ts";
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
   describe("Claude home resolution", () => {
-    it.effect("isolates added accounts while preserving default and explicit homes", () =>
-      Effect.gen(function* () {
-        const defaultId = ProviderInstanceId.make("claudeAgent");
-        const firstId = ProviderInstanceId.make("claude-work");
-        const secondId = ProviderInstanceId.make("claude-personal");
-        expect(yield* resolveClaudeInstanceHome(defaultId, { homePath: "" }, "/data/t3")).toBe("");
-        expect(
-          yield* resolveClaudeInstanceHome(
-            firstId,
-            { homePath: "/existing/root-login" },
-            "/data/t3",
-          ),
-        ).toBe("/existing/root-login");
-        const first = yield* resolveClaudeInstanceHome(firstId, { homePath: "" }, "/data/t3");
-        const second = yield* resolveClaudeInstanceHome(secondId, { homePath: "" }, "/data/t3");
-        expect(first).toBe("/data/t3/accounts/claudeAgent/instance-claude-work");
-        expect(first).not.toBe(second);
-      }),
-    );
-
-    it.effect("does not inherit another account's credentials into a named instance", () =>
-      Effect.gen(function* () {
-        const base = {
-          CLAUDE_CODE_OAUTH_TOKEN: "inherited-token",
-          ANTHROPIC_API_KEY: "inherited-key",
-          PATH: "/bin",
-        };
-        const isolated = yield* mergeProviderInstanceEnvironment(
-          claudeInstanceEnvironment(ProviderInstanceId.make("claude-work"), undefined),
-          base,
-        );
-        expect(isolated.CLAUDE_CODE_OAUTH_TOKEN).toBe("");
-        expect(isolated.ANTHROPIC_API_KEY).toBe("");
-        expect(isolated.PATH).toBe("/bin");
-        const explicit = yield* mergeProviderInstanceEnvironment(
-          claudeInstanceEnvironment(ProviderInstanceId.make("claude-work"), [
-            { name: "ANTHROPIC_API_KEY", value: "instance-key", sensitive: true },
-          ]),
-          base,
-        );
-        expect(explicit.ANTHROPIC_API_KEY).toBe("instance-key");
-        expect(
-          yield* mergeProviderInstanceEnvironment(
-            claudeInstanceEnvironment(ProviderInstanceId.make("claudeAgent"), undefined),
-            base,
-          ),
-        ).toBe(base);
-      }),
-    );
-
     it.effect("resolves configured Claude HOME and stamps continuation/cache keys with it", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -114,59 +59,45 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
     );
   });
 
-  describe("shared user config", () => {
-    it.effect("treats only directories under accounts/claudeAgent as T3 account homes", () =>
-      Effect.gen(function* () {
-        expect(
-          yield* isManagedClaudeAccountHome("/data/t3/accounts/claudeAgent/instance-a", "/data/t3"),
-        ).toBe(true);
-        expect(yield* isManagedClaudeAccountHome("/data/t3/accounts/claudeAgent", "/data/t3")).toBe(
-          false,
-        );
-        expect(yield* isManagedClaudeAccountHome("/home/me/.claude_personal", "/data/t3")).toBe(
-          false,
-        );
-        expect(yield* isManagedClaudeAccountHome("", "/data/t3")).toBe(false);
-      }),
-    );
-
-    it.effect("links skills and settings into an account and keeps its login local", () =>
+  it.effect(
+    "drops the launching Claude session and Electron's run-as-Node flag, and labels processes t3-code unless overridden",
+    () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
-        const shared = path.join(root, "shared");
-        const account = path.join(root, "account");
-        yield* fileSystem.makeDirectory(path.join(shared, "skills", "lavish"), { recursive: true });
-        yield* fileSystem.writeFileString(path.join(shared, "skills", "lavish", "SKILL.md"), "x");
-        yield* fileSystem.writeFileString(path.join(shared, "settings.json"), "{}");
-        yield* fileSystem.writeFileString(path.join(shared, ".credentials.json"), "shared-login");
-        // The account already made its own skills directory before it was linked.
-        yield* fileSystem.makeDirectory(path.join(account, "skills", "synced"), {
-          recursive: true,
+        const homePath = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
+        const host = {
+          CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
+          CLAUDECODE: "1",
+          CLAUDE_CODE_SESSION_ID: "host-session",
+          CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/host-claude.sock",
+          CLAUDE_EFFORT: "high",
+          ELECTRON_RUN_AS_NODE: "1",
+          KEEP: "1",
+        };
+        const instance = [
+          { name: "CLAUDE_CODE_ENTRYPOINT", value: "instance", sensitive: false },
+          { name: "CLAUDE_EFFORT", value: "low", sensitive: false },
+        ];
+
+        expect(yield* mergeClaudeProcessEnvironment({ homePath }, undefined, host)).toEqual({
+          CLAUDE_CODE_ENTRYPOINT: "t3-code",
+          KEEP: "1",
         });
-        yield* fileSystem.writeFileString(path.join(account, ".credentials.json"), "account-login");
+        expect(yield* mergeClaudeProcessEnvironment({ homePath }, instance, host)).toEqual({
+          CLAUDE_CODE_ENTRYPOINT: "instance",
+          CLAUDE_EFFORT: "low",
+          KEEP: "1",
+        });
 
-        yield* shareClaudeUserConfig({ accountHomePath: account, sharedHomePath: shared });
-        yield* shareClaudeUserConfig({ accountHomePath: account, sharedHomePath: shared });
-
-        expect(yield* fileSystem.readLink(path.join(account, "skills"))).toBe(
-          path.join(shared, "skills"),
+        yield* fileSystem.writeFileString(
+          path.join(homePath, "settings.json"),
+          JSON.stringify({ env: { CLAUDE_CODE_ENTRYPOINT: "custom" } }),
         );
-        expect(yield* fileSystem.readDirectory(path.join(account, "skills"))).toEqual(["lavish"]);
-        expect(yield* fileSystem.readLink(path.join(account, "settings.json"))).toBe(
-          path.join(shared, "settings.json"),
-        );
-        expect(yield* fileSystem.exists(path.join(account, "agents"))).toBe(false);
-        expect(yield* fileSystem.readFileString(path.join(account, ".credentials.json"))).toBe(
-          "account-login",
-        );
-        const unshared = yield* fileSystem.readDirectory(path.join(account, ".t3-unshared"));
-        expect(unshared).toHaveLength(1);
         expect(
-          yield* fileSystem.readDirectory(path.join(account, ".t3-unshared", unshared[0]!)),
-        ).toEqual(["synced"]);
-      }).pipe(Effect.scoped),
-    );
-  });
+          (yield* mergeClaudeProcessEnvironment({ homePath }, instance, host))
+            .CLAUDE_CODE_ENTRYPOINT,
+        ).toBe("custom");
+      }),
+  );
 });

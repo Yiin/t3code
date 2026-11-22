@@ -27,6 +27,7 @@ import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { resolveHostCliCommand } from "./invocation.ts";
 
 const modeFlag = Flag.Literals("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
@@ -88,6 +89,12 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
 const openAccessFlag = Flag.Boolean("open-access").pipe(
   Flag.withDescription(
     "Skip pairing and authenticate every request as an administrative session (equivalent to T3CODE_OPEN_ACCESS). Only use when the listener is reachable from a trusted network.",
+  ),
+  Flag.optional,
+);
+const lanFlag = Flag.Boolean("lan").pipe(
+  Flag.withDescription(
+    "Accept connections from your local network and tailnet, not only this machine (equivalent to T3CODE_LAN).",
   ),
   Flag.optional,
 );
@@ -175,6 +182,7 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  lan: Config.Boolean("T3CODE_LAN").pipe(Config.option, Config.map(Option.getOrUndefined)),
 });
 
 const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
@@ -211,6 +219,7 @@ export interface CliServerFlags {
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
   readonly openAccess: Option.Option<boolean>;
+  readonly lan: Option.Option<boolean>;
 }
 
 export interface CliAuthLocationFlags {
@@ -246,6 +255,7 @@ export const sharedServerCommandFlags = {
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
   openAccess: openAccessFlag,
+  lan: lanFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -270,9 +280,13 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly rejectRunningServer?: boolean;
+    readonly selectAutomaticPort?: (
+      preferred: number,
+    ) => Effect.Effect<number, NetService.NetError | CliError.UserError>;
   },
 ) {
   const { findAvailablePort } = yield* NetService.NetService;
+  const selectAutomaticPort = options?.selectAutomaticPort ?? findAvailablePort;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const env = yield* EnvServerConfig;
@@ -290,6 +304,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
     tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     openAccess: flags.openAccess ?? Option.none(),
+    lan: flags.lan ?? Option.none(),
   } satisfies CliServerFlags;
   const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
   const bootstrapEnvelope =
@@ -319,7 +334,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
         if (mode === "desktop") {
           return Effect.succeed(ServerConfig.DEFAULT_PORT);
         }
-        return findAvailablePort(ServerConfig.DEFAULT_PORT);
+        return selectAutomaticPort(ServerConfig.DEFAULT_PORT);
       },
     },
   );
@@ -354,8 +369,13 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
       runtime.value.pid !== process.pid &&
       isProcessAlive(runtime.value.pid)
     ) {
+      // Bare `t3 pair` prefers a linked worktree's `.t3`, so always name this home.
+      const { command: pairCommand } = yield* resolveHostCliCommand("pair", [
+        "--base-dir",
+        baseDir,
+      ]);
       return yield* new CliError.UserError({
-        cause: `A T3 Code server is already running for ${baseDir} (pid ${runtime.value.pid}, ${runtime.value.origin}). Connect to that server, stop it before starting another, or use a different --base-dir.`,
+        cause: `A T3 Code server is already running for ${baseDir} (pid ${runtime.value.pid}, ${runtime.value.origin}). To open it, run \`${pairCommand}\` and open the pairing URL it prints. To start another server, stop this one first or use a different --base-dir.`,
       });
     }
   }
@@ -382,6 +402,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   const shellEnvironmentPrepared = bootstrap?.shellEnvironmentPrepared;
   const desktopTelemetryFd = bootstrap?.desktopTelemetryFd;
   const desktopTelemetryControlFd = bootstrap?.desktopTelemetryControlFd;
+  const desktopAppUpdate = bootstrap?.desktopAppUpdate;
   const desktopBrowserFd = bootstrap?.desktopBrowserFd;
   const desktopBrowserControlFd = bootstrap?.desktopBrowserControlFd;
   const resourceMonitorPath = bootstrap?.resourceMonitorPath;
@@ -427,16 +448,19 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     Option.fromUndefinedOr(env.host),
     Option.fromUndefinedOr(bootstrap?.host),
   );
-  // A background service exists to be reached from other devices, so it
-  // listens on private networks unless `service.env` sets `T3CODE_HOST`.
-  // Clients then learn its LAN address and prefer it over T3 Connect.
+  // Private networks only, so clients learn a LAN address and prefer it over
+  // T3 Connect. `t3 service install` writes T3CODE_LAN=false for a new
+  // service; one installed before T3CODE_LAN existed keeps listening.
+  const lan = resolveOptionPrecedence(normalizedFlags.lan, Option.fromUndefinedOr(env.lan));
   const privateNetworkOnly =
     Option.isNone(explicitHost) &&
     mode === "web" &&
-    (yield* resolveServiceLauncherMode().pipe(
-      Effect.map((launcher) => launcher.managed),
-      Effect.orElseSucceed(() => false),
-    ));
+    (Option.isSome(lan)
+      ? lan.value
+      : yield* resolveServiceLauncherMode().pipe(
+          Effect.map((launcher) => launcher.managed),
+          Effect.orElseSucceed(() => false),
+        ));
   const host = Option.getOrElse(explicitHost, () =>
     privateNetworkOnly ? "0.0.0.0" : mode === "desktop" ? "127.0.0.1" : undefined,
   );
@@ -516,6 +540,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     ...(shellEnvironmentPrepared === undefined ? {} : { shellEnvironmentPrepared }),
     desktopTelemetryFd,
     desktopTelemetryControlFd,
+    ...(desktopAppUpdate === undefined ? {} : { desktopAppUpdate }),
     desktopBrowserFd,
     desktopBrowserControlFd,
     resourceMonitorPath,
@@ -551,6 +576,7 @@ export const resolveCliAuthConfig = (
       // CLI commands open the server's database directly. Open access must not
       // issue a session for them, even when the service environment enables it.
       openAccess: Option.some(false),
+      lan: Option.none(),
     },
     cliLogLevel,
   );

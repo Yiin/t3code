@@ -5,16 +5,17 @@
 set -eo pipefail
 SHA="${1:?deploy sha}"
 MISE="$(command -v mise || echo "$HOME/.local/bin/mise")"
-NODE_BIN="$HOME/.local/share/mise/installs/node/26.12.1/bin"
+NODE_BIN="$HOME/.local/share/mise/installs/node/26.13.1/bin"
 PNPM_DIR="$HOME/.local/share/mise/installs/pnpm/12.14.0"
-[ -x "$NODE_BIN/node" ] || "$MISE" install node@26.12.1
+[ -x "$NODE_BIN/node" ] || "$MISE" install node@26.13.1
 [ -x "$PNPM_DIR/pnpm" ] || "$MISE" install pnpm@12.14.0
 export PATH="$NODE_BIN:$PNPM_DIR:$HOME/.vite-plus/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 node --version; pnpm --version
 
 cd "$HOME/Projects/t3code-upstream"
 test "$(git branch --show-current)" = upstream-patched
-if [ -n "$(git status --porcelain)" ]; then git status --porcelain; echo "BLOCKED: dirty worktree"; exit 2; fi
+dirty="$(git status --porcelain | grep -v '^?? DO-NOT-REMOVE\.md$' || true)"
+if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; echo "BLOCKED: dirty worktree"; exit 2; fi
 git fetch origin upstream-patched
 git merge --ff-only FETCH_HEAD
 test "$(git rev-parse HEAD)" = "$SHA"
@@ -40,10 +41,10 @@ dropins="$HOME/.config/systemd/user/t3code.service.d"
 for f in "$dropins"/*.conf; do
   if grep -qE 'mise/installs/node/[0-9.]+/bin' "$f"; then
     cp -f "$f" "$f.bak-$ts"
-    sed -i -E 's#mise/installs/node/[0-9.]+/bin#mise/installs/node/26.12.1/bin#g' "$f"
+    sed -i -E 's#mise/installs/node/[0-9.]+/bin#mise/installs/node/26.13.1/bin#g' "$f"
   fi
 done
-grep -h 'node/26.12.1' "$dropins"/*.conf
+grep -h 'node/26.13.1' "$dropins"/*.conf
 
 systemctl --user daemon-reload
 systemctl --user restart t3code.service

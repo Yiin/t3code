@@ -1,123 +1,16 @@
-import type {
-  ClaudeSettings,
-  ProviderInstanceId,
-  ResolvedProviderInstanceEnvironment,
-} from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
+import type { ClaudeSettings, ProviderInstanceEnvironment } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import { readClaudeSettingsEnv } from "./ClaudeSkills.ts";
+
 const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
-
-/** The default instance uses the CLI login; added accounts start with their own directory. */
-export const resolveClaudeInstanceHome = Effect.fn("resolveClaudeInstanceHome")(function* (
-  instanceId: ProviderInstanceId,
-  config: Pick<ClaudeSettings, "homePath">,
-  baseDir: string,
-) {
-  if (config.homePath.trim() || instanceId === "claudeAgent") return config.homePath;
-  const path = yield* Path.Path;
-  return path.join(
-    baseDir,
-    "accounts",
-    "claudeAgent",
-    `instance-${encodeURIComponent(instanceId)}`,
-  );
-});
-
-/**
- * User config that every T3 account directory shares with the default Claude
- * home. Logins, account settings, and conversation state stay per account.
- */
-const CLAUDE_SHARED_USER_CONFIG = [
-  "CLAUDE.md",
-  "settings.json",
-  "skills",
-  "agents",
-  "commands",
-  "output-styles",
-  "hooks",
-  "plugins",
-] as const;
-
-/** Account directories that T3 creates and owns. A custom CLAUDE_CONFIG_DIR stays isolated. */
-export const isManagedClaudeAccountHome = Effect.fn("isManagedClaudeAccountHome")(function* (
-  homePath: string,
-  baseDir: string,
-) {
-  if (!homePath.trim()) return false;
-  const path = yield* Path.Path;
-  const accountsDir = path.resolve(baseDir, "accounts", "claudeAgent");
-  const relative = path.relative(accountsDir, path.resolve(homePath));
-  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
-});
-
-/**
- * Links the shared Claude home's user config into an account directory. A real
- * entry already there moves to `.t3-unshared/`; an existing link stays. Failures
- * only log, so a missing skill never stops the account.
- */
-export const shareClaudeUserConfig = Effect.fn("shareClaudeUserConfig")(
-  function* (input: { readonly accountHomePath: string; readonly sharedHomePath: string }) {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const accountHomePath = path.resolve(input.accountHomePath);
-    const sharedHomePath = path.resolve(input.sharedHomePath);
-    if (accountHomePath === sharedHomePath) return;
-    yield* fileSystem.makeDirectory(accountHomePath, { recursive: true });
-    for (const entry of CLAUDE_SHARED_USER_CONFIG) {
-      const targetPath = path.join(sharedHomePath, entry);
-      const linkPath = path.join(accountHomePath, entry);
-      yield* Effect.gen(function* () {
-        if (!(yield* fileSystem.exists(targetPath))) return;
-        if (Option.isSome(yield* fileSystem.readLink(linkPath).pipe(Effect.option))) return;
-        if (yield* fileSystem.exists(linkPath)) {
-          const unsharedDir = path.join(accountHomePath, ".t3-unshared");
-          const unsharedPath = path.join(unsharedDir, `${entry}.${yield* Clock.currentTimeMillis}`);
-          yield* fileSystem.makeDirectory(unsharedDir, { recursive: true });
-          yield* fileSystem.rename(linkPath, unsharedPath);
-          yield* Effect.logInfo("Moved account-local Claude config aside to share it", {
-            entry,
-            unsharedPath,
-          });
-        }
-        yield* fileSystem.symlink(targetPath, linkPath);
-      }).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("Could not share Claude user config with an account", {
-            entry,
-            accountHomePath,
-            cause,
-          }),
-        ),
-      );
-    }
-  },
-  Effect.catch((cause) =>
-    Effect.logWarning("Could not prepare Claude account directory", { cause }),
-  ),
-);
-
-export function claudeInstanceEnvironment(
-  instanceId: ProviderInstanceId,
-  environment: ResolvedProviderInstanceEnvironment | undefined,
-): ResolvedProviderInstanceEnvironment {
-  if (instanceId === "claudeAgent") return environment ?? [];
-  return [
-    ...["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].map((name) => ({
-      name,
-      value: "",
-      sensitive: true,
-    })),
-    ...(environment ?? []),
-  ];
-}
 
 export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
@@ -152,6 +45,48 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   };
 });
 
+// A Claude Code session that launched T3 exports these. A claude spawned with them acts as part of
+// that session: its session id, messaging socket and token, and effort.
+const CLAUDE_HOST_SESSION_VARIABLES = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_HOST_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_DESKTOP_APP_VERSION",
+  "CLAUDE_EFFORT",
+  "CLAUDE_PID",
+  "CLAUDE_AGENT_SDK_VERSION",
+];
+
+/**
+ * Base env for the Claude processes T3 Code runs, before `makeClaudeEnvironment`.
+ * Claude Code reads its entrypoint from the process env, not its settings `env`, so T3 Code applies that override itself.
+ */
+export const mergeClaudeProcessEnvironment = Effect.fn("mergeClaudeProcessEnvironment")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  instanceEnvironment: ProviderInstanceEnvironment | undefined,
+  hostEnvironment: NodeJS.ProcessEnv,
+) {
+  const baseEnvironment: NodeJS.ProcessEnv = {
+    ...hostEnvironment,
+    CLAUDE_CODE_ENTRYPOINT: "t3-code",
+  };
+  for (const name of CLAUDE_HOST_SESSION_VARIABLES) delete baseEnvironment[name];
+  // The desktop runs the server as Node through Electron. Commands Claude runs inherit its env, so
+  // an Electron app they start (T3 Code itself, VS Code) would run as Node and exit.
+  delete baseEnvironment.ELECTRON_RUN_AS_NODE;
+  const environment = yield* mergeProviderInstanceEnvironment(instanceEnvironment, baseEnvironment);
+  const settingsEntrypoint = (yield* readClaudeSettingsEnv(config, undefined, environment))
+    .CLAUDE_CODE_ENTRYPOINT;
+  return settingsEntrypoint
+    ? { ...environment, CLAUDE_CODE_ENTRYPOINT: settingsEntrypoint }
+    : environment;
+});
+
 /** managed-mcp.json excludes other MCP config and forbids --strict-mcp-config; omit the flag when present. */
 export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -163,6 +98,49 @@ export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(
         ? "C:\\Program Files\\ClaudeCode\\managed-mcp.json"
         : "/etc/claude-code/managed-mcp.json";
   return yield* fileSystem.exists(managedMcpConfigPath).pipe(Effect.orElseSucceed(() => false));
+});
+
+// A worktree's .git file points at <main>/.git/worktrees/<name>, whose commondir leads back to
+// <main>/.git. A bare repository has no main checkout, so its worktree keeps its own file.
+// Untraced because claudeLocalSettingsDirectory already owns the span.
+const mainCheckoutRoot = Effect.fnUntraced(function* (checkout: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* fileSystem.readFileString(path.join(checkout, ".git")).pipe(
+    Effect.flatMap((pointer) => {
+      const gitDir = /^gitdir:\s*(.+)$/m.exec(pointer)?.[1]?.trim();
+      if (gitDir === undefined) return Effect.succeed(checkout);
+      const worktreeGitDir = path.resolve(checkout, gitDir);
+      return fileSystem.readFileString(path.join(worktreeGitDir, "commondir")).pipe(
+        Effect.map((commonDir) => {
+          const common = path.resolve(worktreeGitDir, commonDir.trim());
+          return path.basename(common) === ".git" ? path.dirname(common) : checkout;
+        }),
+      );
+    }),
+    Effect.orElseSucceed(() => checkout),
+  );
+});
+
+// Claude Code keeps .claude/settings.local.json at the repository root, or in cwd outside a
+// repository, on Windows, or when the root is home. Its owner check is skipped, so callers must
+// stay safe when Claude Code ignores the root file.
+export const claudeLocalSettingsDirectory = Effect.fn("claudeLocalSettingsDirectory")(function* (
+  cwd: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if ((yield* HostProcess.Platform) === "win32") return cwd;
+  for (let directory = cwd; ; directory = path.dirname(directory)) {
+    const isCheckout = yield* fileSystem
+      .exists(path.join(directory, ".git"))
+      .pipe(Effect.orElseSucceed(() => false));
+    if (isCheckout) {
+      const root = yield* mainCheckoutRoot(directory);
+      return root === (yield* HostProcess.HomeDirectory) ? cwd : root;
+    }
+    if (path.dirname(directory) === directory) return cwd;
+  }
 });
 
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(

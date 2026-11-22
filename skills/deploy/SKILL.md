@@ -61,11 +61,7 @@ patched files. For each patch, drop it if upstream now does the same thing.
 Keep or adapt it otherwise. Our patches:
 
 - open access mode (`T3CODE_OPEN_ACCESS=1`). yiin-lt needs it.
-- turn watchdog for a silent provider
 - resume a thread when the provider process dies mid-turn
-- Claude account sign-in with separate account directories, and shared skills
-  and settings for them. The external `claude-accounts` tool reads those homes
-  from `~/.t3/userdata/settings.json`, so keep that path layout.
 - send a message while background work runs
 - "Resume now on <account>" for a usage-limited thread
 - this skill (`skills/deploy`)

@@ -19,7 +19,7 @@ export interface ReviewGuideChange {
   readonly hunks: ReadonlyMap<string, FileHunks>;
 }
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+export const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 const hunkRange = (start: string, count: string | undefined): LineRange | null => {
   const lines = count === undefined ? 1 : Number(count);
@@ -30,7 +30,7 @@ const hunkRange = (start: string, count: string | undefined): LineRange | null =
  * Git quotes a name holding a tab, quote or backslash, and ends an unquoted name holding a space
  * with a tab, so the first literal tab is never part of what the file is called.
  */
-function headerPath(line: string, prefix: string): string | null {
+export function headerPath(line: string, prefix: string): string | null {
   const rest = line.slice(4);
   const tab = rest.indexOf("\t");
   const token = tab === -1 ? rest : rest.slice(0, tab);
@@ -87,26 +87,29 @@ function clampExcerpt(
 function mergeExcerpts(
   excerpts: ReadonlyArray<PullRequestReviewGuideExcerpt>,
 ): Array<PullRequestReviewGuideExcerpt> {
-  const merged: Array<PullRequestReviewGuideExcerpt> = [];
+  let merged: Array<PullRequestReviewGuideExcerpt> = [];
   for (const excerpt of excerpts) {
-    const index = merged.findIndex(
-      (other) =>
-        other.path === excerpt.path &&
-        other.side === excerpt.side &&
-        other.start <= excerpt.end + 1 &&
-        excerpt.start <= other.end + 1,
-    );
-    const other = merged[index];
-    if (other === undefined) {
+    const touches = (other: PullRequestReviewGuideExcerpt) =>
+      other.path === excerpt.path &&
+      other.side === excerpt.side &&
+      other.start <= excerpt.end + 1 &&
+      excerpt.start <= other.end + 1;
+    // An excerpt can bridge several earlier ones; fold them all into the first.
+    const group = merged.filter(touches);
+    const first = group[0];
+    if (first === undefined) {
       merged.push(excerpt);
       continue;
     }
-    merged[index] = {
-      ...other,
-      start: Math.min(other.start, excerpt.start),
-      end: Math.max(other.end, excerpt.end),
-      caption: other.caption || excerpt.caption,
+    const combined = {
+      ...first,
+      start: Math.min(excerpt.start, ...group.map((other) => other.start)),
+      end: Math.max(excerpt.end, ...group.map((other) => other.end)),
+      caption: group.find((other) => other.caption)?.caption ?? excerpt.caption,
     };
+    merged = merged.flatMap((other) =>
+      other === first ? [combined] : touches(other) ? [] : [other],
+    );
   }
   return merged.map((excerpt) => ({
     ...excerpt,
