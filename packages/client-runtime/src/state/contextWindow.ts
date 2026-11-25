@@ -1,5 +1,6 @@
 import {
   resolveIdleCompaction,
+  resolveIdleCompactionThreshold,
   type ModelSelection,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2ProviderTurnTokenUsage,
@@ -20,6 +21,8 @@ import type { ThreadStructure, ThreadStructureTurnItem } from "./models.ts";
 
 // Fallback TTL: Claude's 1h cache plus slack.
 const CLAUDE_RESUME_COMPACTION_FALLBACK_MS = 70 * 60_000;
+// Gemini's implicit prompt cache cools down in minutes without reporting a TTL.
+const ANTIGRAVITY_RESUME_COMPACTION_IDLE_MS = 5 * 60_000;
 
 // A typed `/compact`, with or without instructions, is already the compaction. Queueing a
 // bare one ahead of it would run an uninstructed compaction first and charge for two.
@@ -261,11 +264,18 @@ export function shouldOfferResumeCompaction(input: {
   readonly usedTokens: number | null | undefined;
   readonly updatedAt: string | null | undefined;
   readonly promptCacheTtlMs?: number | undefined;
+  readonly minTokens?: number | undefined;
   readonly now: string;
 }): boolean {
+  const defaultTtlMs =
+    input.provider === "claudeAgent"
+      ? CLAUDE_RESUME_COMPACTION_FALLBACK_MS
+      : input.provider === "antigravity"
+        ? ANTIGRAVITY_RESUME_COMPACTION_IDLE_MS
+        : null;
   if (
-    input.provider !== "claudeAgent" ||
-    (input.usedTokens ?? 0) < COMPACTION_SUGGESTION_MIN_TOKENS
+    defaultTtlMs === null ||
+    (input.usedTokens ?? 0) < (input.minTokens ?? COMPACTION_SUGGESTION_MIN_TOKENS)
   ) {
     return false;
   }
@@ -275,7 +285,7 @@ export function shouldOfferResumeCompaction(input: {
   return (
     Number.isFinite(updatedAt) &&
     Number.isFinite(now) &&
-    now - updatedAt >= (input.promptCacheTtlMs ?? CLAUDE_RESUME_COMPACTION_FALLBACK_MS)
+    now - updatedAt >= (input.promptCacheTtlMs ?? defaultTtlMs)
   );
 }
 
@@ -359,6 +369,7 @@ export function compactBeforeSendTokens(input: {
       usedTokens: contextWindow.usedTokens,
       updatedAt: contextWindow.updatedAt,
       promptCacheTtlMs: liveUsage?.promptCacheTtlMs,
+      minTokens: resolveIdleCompactionThreshold(input.settings, provider.instanceId),
       now: input.now,
     })
     ? contextWindow.usedTokens

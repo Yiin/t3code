@@ -8,16 +8,19 @@ import {
   ProviderInstanceId,
 } from "./providerInstance.ts";
 import {
+  AntigravitySettings,
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClientServerSettingsPatch,
   ClaudeSettings,
+  DEFAULT_IDLE_COMPACTION_THRESHOLD,
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
   idleCompactionPatch,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   requiredScopesForProjectMutation,
   resolveIdleCompaction,
+  resolveIdleCompactionThreshold,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -273,12 +276,17 @@ describe("custom model settings", () => {
 });
 
 describe("resolveIdleCompaction", () => {
-  it("lets a Claude instance override the global default", () => {
+  it("lets a Claude or Antigravity instance override the global default and threshold", () => {
     const settings = decodeServerSettings({
       idleCompaction: "off",
       providerInstances: {
         claude_work: { driver: "claudeAgent", config: { idleCompaction: "onReturn" } },
         claude_personal: { driver: "claudeAgent" },
+        ag_custom: {
+          driver: "antigravity",
+          config: { idleCompaction: "beforeCacheExpires", idleCompactionThreshold: "120000" },
+        },
+        ag_default: { driver: "antigravity" },
       },
     });
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claude_work"))).toBe(
@@ -286,6 +294,28 @@ describe("resolveIdleCompaction", () => {
     );
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claude_personal"))).toBe("off");
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe("off");
+    expect(resolveIdleCompaction(settings, ProviderInstanceId.make("ag_custom"))).toBe(
+      "beforeCacheExpires",
+    );
+    expect(resolveIdleCompaction(settings, ProviderInstanceId.make("ag_default"))).toBe("off");
+    expect(resolveIdleCompactionThreshold(settings, ProviderInstanceId.make("ag_custom"))).toBe(
+      120_000,
+    );
+    expect(resolveIdleCompactionThreshold(settings, ProviderInstanceId.make("ag_default"))).toBe(
+      DEFAULT_IDLE_COMPACTION_THRESHOLD,
+    );
+    expect(resolveIdleCompactionThreshold(settings, ProviderInstanceId.make("claude_work"))).toBe(
+      DEFAULT_IDLE_COMPACTION_THRESHOLD,
+    );
+    const decodeAntigravity = Schema.decodeUnknownSync(AntigravitySettings);
+    expect(decodeAntigravity({ idleCompactionThreshold: "50000" }).idleCompactionThreshold).toBe(
+      "50000",
+    );
+    expect(decodeAntigravity({ idleCompactionThreshold: "1000000" }).idleCompactionThreshold).toBe(
+      "1000000",
+    );
+    expect(() => decodeAntigravity({ idleCompactionThreshold: "49999" })).toThrow();
+    expect(() => decodeAntigravity({ idleCompactionThreshold: "1000001" })).toThrow();
   });
 
   it("reads the mode from the legacy switch, in either form servers saved it", () => {

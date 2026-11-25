@@ -11,6 +11,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RunId,
+  type ServerProvider,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -22,12 +23,17 @@ import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as IdleCompactionService from "./IdleCompactionService.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
-import { idleCompactionWindow, type IdleCompactionRecords } from "./IdleCompaction.ts";
+import {
+  ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS,
+  idleCompactionWindow,
+  type IdleCompactionRecords,
+} from "./IdleCompaction.ts";
 
 const NOW_MS = Date.parse("2026-10-19T12:00:00.000Z");
 const MINUTE_MS = 60_000;
@@ -222,6 +228,41 @@ describe("idleCompactionWindow", () => {
     ];
     expect(idleCompactionWindow(delegating, NOW_MS)?.runId).toBe(runId);
   });
+
+  it("computes a between-jobs window for Antigravity from providerThread.contextUsage and custom thresholds", () => {
+    const agInstance = ProviderInstanceId.make("antigravity");
+    const ag = records();
+    ag.thread = {
+      ...ag.thread,
+      providerInstanceId: agInstance,
+      modelSelection: { instanceId: agInstance, model: "gemini-4-neon" },
+    };
+    ag.runs = ag.runs.map((run) => ({
+      ...run,
+      providerInstanceId: agInstance,
+      modelSelection: { instanceId: agInstance, model: "gemini-4-neon" },
+    }));
+    ag.providerThreads = [
+      {
+        ...ag.providerThreads[0]!,
+        driver: ProviderDriverKind.make("antigravity"),
+        providerInstanceId: agInstance,
+        contextUsage: { usedTokens: 160_000, maxTokens: 1_048_576 },
+      },
+    ];
+    ag.providerTurns = ag.providerTurns.map(({ tokenUsage: _ignored, ...turn }) => turn);
+
+    // Below default 200K threshold
+    expect(idleCompactionWindow(ag, NOW_MS)).toBeNull();
+    // Above custom 150K threshold
+    expect(idleCompactionWindow(ag, NOW_MS, { minTokens: 150_000 })).toEqual({
+      runId,
+      startMs: NOW_MS + ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS,
+      endMs: NOW_MS + 10 * MINUTE_MS,
+    });
+    // Skips if the completion is already older than the warm window ceiling
+    expect(idleCompactionWindow(ag, NOW_MS + 10 * MINUTE_MS, { minTokens: 150_000 })).toBeNull();
+  });
 });
 
 describe("IdleCompactionService", () => {
@@ -237,6 +278,28 @@ describe("IdleCompactionService", () => {
     { mode: "beforeCacheExpires", driver: "codex", instance: "custom-codex", reads: 0 },
     { mode: "beforeCacheExpires", driver: "claudeAgent", instance: "custom-claude", reads: 1 },
     { mode: "beforeCacheExpires", unconfigured: true, reads: 1 },
+    {
+      mode: "beforeCacheExpires",
+      driver: "antigravity",
+      instance: "antigravity",
+      advertisesCompact: true,
+      reads: 1,
+    },
+    {
+      mode: "beforeCacheExpires",
+      driver: "antigravity",
+      instance: "antigravity",
+      advertisesCompact: false,
+      reads: 0,
+    },
+    {
+      mode: "onReturn",
+      override: "beforeCacheExpires",
+      driver: "antigravity",
+      instance: "custom-antigravity",
+      advertisesCompact: true,
+      reads: 1,
+    },
   ] as const)(
     "loads history only for eligible idle compaction: $mode/$override/$enabled/$projectDisabled/$instance/$unconfigured",
     (scenario) => {
@@ -244,6 +307,7 @@ describe("IdleCompactionService", () => {
         override: "default",
         enabled: true,
         projectDisabled: false,
+        advertisesCompact: true,
         ...scenario,
       } as const;
       return Effect.gen(function* () {
@@ -264,12 +328,23 @@ describe("IdleCompactionService", () => {
             ...run,
             providerInstanceId: selectedInstance,
             modelSelection: { ...run.modelSelection, instanceId: selectedInstance },
+            // Place Antigravity completions past the 30s debounce so this eligibility table completes synchronously.
+            ...(driver === "antigravity"
+              ? { completedAt: at(-ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS) }
+              : {}),
           })),
           providerThreads: base.providerThreads.map((thread) => ({
             ...thread,
             driver,
             providerInstanceId: selectedInstance,
+            ...(driver === "antigravity"
+              ? { contextUsage: { usedTokens: 250_000, maxTokens: 1_048_576 } }
+              : {}),
           })),
+          providerTurns:
+            driver === "antigravity"
+              ? base.providerTurns.map(({ tokenUsage: _ignored, ...turn }) => turn)
+              : base.providerTurns,
           attempts: [],
           nodes: [],
           subagents: [],
@@ -320,6 +395,15 @@ describe("IdleCompactionService", () => {
                 return data;
               }),
           }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              {
+                instanceId: selectedInstance,
+                driver,
+                slashCommands: test.advertisesCompact ? [{ name: "compact" }] : [],
+              } as unknown as ServerProvider,
+            ]),
+          }),
           Layer.mock(ServerSettings.ServerSettingsService)({
             getSettings: Effect.succeed({
               ...DEFAULT_SERVER_SETTINGS,
@@ -353,6 +437,102 @@ describe("IdleCompactionService", () => {
         expect(dispatches).toBe(test.reads);
       });
     },
+  );
+
+  it.effect("waits the Antigravity debounce and respects idleCompactionThreshold", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const agInstance = ProviderInstanceId.make("antigravity");
+      const agDriver = ProviderDriverKind.make("antigravity");
+      const base = records();
+      const data: OrchestrationV2ThreadProjection = {
+        ...base,
+        thread: {
+          ...base.thread,
+          providerInstanceId: agInstance,
+          modelSelection: { instanceId: agInstance, model: "gemini-4-neon" },
+        },
+        runs: base.runs.map((run) => ({
+          ...run,
+          providerInstanceId: agInstance,
+          modelSelection: { instanceId: agInstance, model: "gemini-4-neon" },
+        })),
+        providerThreads: base.providerThreads.map((thread) => ({
+          ...thread,
+          driver: agDriver,
+          providerInstanceId: agInstance,
+          contextUsage: { usedTokens: 120_000, maxTokens: 1_048_576 },
+        })),
+        providerTurns: base.providerTurns.map(({ tokenUsage: _ignored, ...turn }) => turn),
+        attempts: [],
+        nodes: [],
+        subagents: [],
+        providerSessions: [],
+        plans: [],
+        checkpointScopes: [],
+        checkpoints: [],
+        contextHandoffs: [],
+        visibleTurnItems: [],
+        updatedAt: at(),
+      };
+      const dispatched: Array<string> = [];
+      const streamDone = yield* Deferred.make<void>();
+      const dependencies = Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          streamDomainEvents: Stream.make({
+            id: EventId.make("ag-completed"),
+            type: "run.updated" as const,
+            threadId,
+            runId,
+            occurredAt: at(),
+            payload: data.runs[0]!,
+          }).pipe(Stream.ensuring(Deferred.succeed(streamDone, undefined))),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              dispatched.push(command.commandId);
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThread: () => Effect.succeed(data.thread),
+          getThreadRecords: () => Effect.succeed(data),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([
+            {
+              instanceId: agInstance,
+              driver: agDriver,
+              slashCommands: [{ name: "compact" }],
+            } as unknown as ServerProvider,
+          ]),
+        }),
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          getSettings: Effect.succeed({
+            ...DEFAULT_SERVER_SETTINGS,
+            idleCompaction: "onReturn",
+            providerInstances: {
+              [agInstance]: {
+                driver: agDriver,
+                enabled: true,
+                config: {
+                  idleCompaction: "beforeCacheExpires",
+                  idleCompactionThreshold: "100000",
+                },
+              },
+            },
+          }),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* IdleCompactionService.make;
+        yield* service.start();
+        yield* Deferred.await(streamDone);
+        yield* TestClock.adjust(ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS - 1_000);
+        expect(dispatched).toEqual([]);
+        yield* TestClock.adjust(1_000);
+      }).pipe(Effect.provide(dependencies));
+      expect(dispatched).toEqual(["server:idle-compact:idle-thread:run-1"]);
+    }),
   );
 
   it.effect("keeps the latest run's compaction when an earlier run reports completed again", () =>
@@ -428,6 +608,9 @@ describe("IdleCompactionService", () => {
                   (message.runId !== null && options.messageRunIds.includes(message.runId)),
               ),
             }),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([]),
         }),
         Layer.mock(ServerSettings.ServerSettingsService)({
           getSettings: Effect.succeed({

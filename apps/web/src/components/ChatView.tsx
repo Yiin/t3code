@@ -85,6 +85,7 @@ import {
   type ThreadId,
   ProviderInteractionMode,
   resolveIdleCompaction,
+  resolveIdleCompactionThreshold,
   RuntimeMode,
 } from "@t3tools/contracts";
 import {
@@ -2623,14 +2624,13 @@ export default function ChatView(props: ChatViewProps) {
   const freshSessionPending = freshSessionAvailable && freshSessionArmed;
   // The context window is the current conversation's, so neither a handoff destination nor
   // the fresh session armed by /clear inherits it.
+  const activeIdleCompactionInstanceId =
+    activeProviderInstanceId ?? ProviderInstanceId.make("claudeAgent");
   const resumeCompactionTokens =
     activeContextWindow &&
     pendingHandoff === null &&
     !freshSessionPending &&
-    resolveIdleCompaction(
-      settings,
-      activeProviderInstanceId ?? ProviderInstanceId.make("claudeAgent"),
-    ) !== "off" &&
+    resolveIdleCompaction(settings, activeIdleCompactionInstanceId) !== "off" &&
     !resumeCompactionPermanentlyDismissed &&
     !nativeResumeCompactionDismissed &&
     !compactDisabled &&
@@ -2641,6 +2641,7 @@ export default function ChatView(props: ChatViewProps) {
       usedTokens: activeContextWindow.usedTokens,
       updatedAt: activeContextWindow.updatedAt,
       promptCacheTtlMs: activeThreadLiveTokenUsage?.promptCacheTtlMs,
+      minTokens: resolveIdleCompactionThreshold(settings, activeIdleCompactionInstanceId),
       now: `${nowMinute}:00.000Z`,
     })
       ? activeContextWindow.usedTokens

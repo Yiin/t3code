@@ -64,6 +64,7 @@ Keep or adapt it otherwise. Our patches:
 - resume a thread when the provider process dies mid-turn
 - send a message while background work runs
 - "Resume now on <account>" for a usage-limited thread
+- Antigravity automatic idle/between-jobs and on-return compaction with configurable token threshold
 - this skill (`skills/deploy`)
 
 Check the runtime pins in `package.json` (`engines.node`, `packageManager`).

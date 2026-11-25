@@ -772,6 +772,9 @@ export const CodexSettings = makeProviderSettingsSchema(
 export type CodexSettings = typeof CodexSettings.Type;
 
 const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
+const ANTIGRAVITY_IDLE_COMPACTION_THRESHOLD_PATTERN = /^(?:|[5-9]\d{4}|[1-9]\d{5}|1000000)$/;
+
+export const DEFAULT_IDLE_COMPACTION_THRESHOLD = 200_000;
 
 export const IDLE_COMPACTION_MODES = [
   { value: "onReturn", label: "When you return" },
@@ -932,12 +935,49 @@ export const AntigravitySettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "Automatic", clearWhenEmpty: "persist" },
       }),
     ),
+    idleCompactionThreshold: TrimmedString.check(
+      Schema.isPattern(ANTIGRAVITY_IDLE_COMPACTION_THRESHOLD_PATTERN),
+    ).pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Auto-compact after",
+        description:
+          "Compact idle or returning threads above this token count (50,000 to 1,000,000). Leave empty for 200,000.",
+        providerSettingsForm: {
+          placeholder: "200000",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    idleCompaction: InstanceIdleCompaction.pipe(
+      Schema.withDecodingDefault(Effect.succeed("default" as const)),
+      Schema.annotateKey({
+        title: "Compact idle threads",
+        description:
+          "When to compact an idle thread over the token threshold: after you return, between jobs while the cache is warm, or never. Overrides the default in Providers > Advanced.",
+        providerSettingsForm: {
+          control: "select",
+          options: INSTANCE_IDLE_COMPACTION_MODES,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
-  { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath"] },
+  {
+    order: [
+      "authMethod",
+      "apiKey",
+      "gcpProject",
+      "gcpLocation",
+      "binaryPath",
+      "idleCompactionThreshold",
+      "idleCompaction",
+    ],
+  },
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
@@ -1695,6 +1735,7 @@ export const resolveTextGenerationSelectionEnabled = (
   resolveProjectProviderInstanceEnabled(settings, projectId, instanceId);
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
+const decodeAntigravitySettings = Schema.decodeUnknownOption(AntigravitySettings);
 
 type IdleCompactionSettings = Pick<ServerSettings, "compactIdleThreads" | "idleCompaction">;
 
@@ -1736,11 +1777,35 @@ export const resolveIdleCompaction = (
   const instance = Object.hasOwn(settings.providerInstances, instanceId)
     ? settings.providerInstances[instanceId]
     : undefined;
-  const override = decodeClaudeSettings(instance?.config ?? {}).pipe(
-    Option.map((config) => config.idleCompaction),
-    Option.getOrElse(() => "default" as const),
-  );
+  const override =
+    instance?.driver === "antigravity"
+      ? decodeAntigravitySettings(instance.config ?? {}).pipe(
+          Option.map((config) => config.idleCompaction),
+          Option.getOrElse(() => "default" as const),
+        )
+      : decodeClaudeSettings(instance?.config ?? {}).pipe(
+          Option.map((config) => config.idleCompaction),
+          Option.getOrElse(() => "default" as const),
+        );
   return override === "default" ? globalIdleCompaction(settings) : override;
+};
+
+export const resolveIdleCompactionThreshold = (
+  settings: Pick<ServerSettings, "providerInstances">,
+  instanceId: ProviderInstanceId,
+): number => {
+  const instance = Object.hasOwn(settings.providerInstances, instanceId)
+    ? settings.providerInstances[instanceId]
+    : undefined;
+  if (instance?.driver !== "antigravity") return DEFAULT_IDLE_COMPACTION_THRESHOLD;
+  return decodeAntigravitySettings(instance.config ?? {}).pipe(
+    Option.map((config) =>
+      config.idleCompactionThreshold.length > 0
+        ? Number(config.idleCompactionThreshold)
+        : DEFAULT_IDLE_COMPACTION_THRESHOLD,
+    ),
+    Option.getOrElse(() => DEFAULT_IDLE_COMPACTION_THRESHOLD),
+  );
 };
 
 export const ServerSettingsOperation = Schema.Literals([

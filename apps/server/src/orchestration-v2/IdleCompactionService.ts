@@ -3,8 +3,11 @@ import {
   IDLE_COMPACTION_TEXT,
   MessageId,
   resolveIdleCompaction,
+  resolveIdleCompactionThreshold,
   resolveProjectProviderInstanceEnabled,
+  type ProviderInstanceId,
   type RunId,
+  type ServerProvider,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -13,22 +16,57 @@ import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
 import * as Stream from "effect/Stream";
 
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { idleCompactionWindow } from "./IdleCompaction.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
+function providerAdvertisesCompact(provider: ServerProvider | undefined): boolean {
+  if (provider === undefined) return false;
+  return (
+    provider.slashCommands.some((command) => command.name === "compact") ||
+    (provider.workspaceSnapshots?.some((workspace) =>
+      workspace.slashCommands.some((command) => command.name === "compact"),
+    ) ??
+      false)
+  );
+}
+
 /**
- * Beta: when a run completes on a Claude instance set to compact before the
- * cache expires, waits until shortly before its prompt cache expires and sends
- * `/compact` as a visible T3 Code turn. Timers live in
- * memory, so a server restart skips compactions that were still waiting.
+ * Beta: waits until an idle Claude or Antigravity run is due and dispatches
+ * `/compact`. Timers live in memory, so a server restart skips waiting ones.
  */
 export const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const providers = yield* ProviderRegistry.ProviderRegistry;
+
+  const instanceDriverOf = (
+    current: Parameters<typeof resolveIdleCompaction>[0],
+    instanceId: ProviderInstanceId,
+  ) =>
+    Object.hasOwn(current.providerInstances, instanceId)
+      ? current.providerInstances[instanceId]?.driver
+      : instanceId === "claudeAgent" || instanceId === "antigravity"
+        ? instanceId
+        : undefined;
+
+  const supportsIdleCompaction = (
+    current: Parameters<typeof resolveIdleCompaction>[0],
+    instanceId: ProviderInstanceId,
+  ) => {
+    const driver = instanceDriverOf(current, instanceId);
+    if (driver === "claudeAgent") return Effect.succeed(true);
+    if (driver !== "antigravity") return Effect.succeed(false);
+    return providers.getProviders.pipe(
+      Effect.map((list) =>
+        providerAdvertisesCompact(list.find((entry) => entry.instanceId === instanceId)),
+      ),
+    );
+  };
 
   const compactWhenDue = Effect.fn("IdleCompactionService.compactWhenDue")(
     function* (threadId: ThreadId, completedRunId: RunId) {
@@ -37,11 +75,8 @@ export const make = Effect.gen(function* () {
       while (true) {
         const current = yield* settings.getSettings;
         const thread = yield* projections.getThread(threadId);
-        const claudeInstance = Object.hasOwn(current.providerInstances, thread.providerInstanceId)
-          ? current.providerInstances[thread.providerInstanceId]?.driver === "claudeAgent"
-          : thread.providerInstanceId === "claudeAgent";
         if (
-          !claudeInstance ||
+          !(yield* supportsIdleCompaction(current, thread.providerInstanceId)) ||
           resolveIdleCompaction(current, thread.providerInstanceId) !== "beforeCacheExpires" ||
           !resolveProjectProviderInstanceEnabled(
             current,
@@ -79,6 +114,7 @@ export const make = Effect.gen(function* () {
           },
         );
         if (
+          !(yield* supportsIdleCompaction(current, records.thread.providerInstanceId)) ||
           resolveIdleCompaction(current, records.thread.providerInstanceId) !==
             "beforeCacheExpires" ||
           !resolveProjectProviderInstanceEnabled(
@@ -100,7 +136,9 @@ export const make = Effect.gen(function* () {
           continue;
         }
         const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-        const window = idleCompactionWindow(records, nowMs);
+        const window = idleCompactionWindow(records, nowMs, {
+          minTokens: resolveIdleCompactionThreshold(current, records.thread.providerInstanceId),
+        });
         if (window?.runId !== runId) return;
         if (nowMs < window.startMs) {
           yield* Effect.sleep(Duration.millis(window.startMs - nowMs));

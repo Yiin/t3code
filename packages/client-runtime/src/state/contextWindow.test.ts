@@ -22,6 +22,7 @@ const claude = ProviderInstanceId.make("claudeAgent");
 const claudeWork = ProviderInstanceId.make("claude_work");
 const claudeOtherHome = ProviderInstanceId.make("claude_other_home");
 const codex = ProviderInstanceId.make("codex");
+const antigravity = ProviderInstanceId.make("antigravity");
 const lastTurnAt = "2026-10-30T14:23:02.000Z";
 const returnedAt = "2026-10-30T23:03:21.000Z";
 
@@ -48,24 +49,31 @@ function sendInput(
   const source = overrides.source ?? claude;
   const sourceSelection = {
     instanceId: source,
-    model: source === codex ? "gpt-5.4" : "claude-opus-4-6",
+    model:
+      source === codex ? "gpt-5.4" : source === antigravity ? "gemini-4-neon" : "claude-opus-4-6",
   };
   const providers = [
     { instanceId: claude, driver: "claudeAgent", groupKey: "claude:~/.claude" },
     { instanceId: claudeWork, driver: "claudeAgent", groupKey: "claude:~/.claude" },
     { instanceId: claudeOtherHome, driver: "claudeAgent", groupKey: "claude:~/.claude-other" },
     { instanceId: codex, driver: "codex", groupKey: "codex:~/.codex" },
+    { instanceId: antigravity, driver: "antigravity", groupKey: "antigravity:default" },
   ].map(({ instanceId, driver, groupKey }) => ({
     instanceId,
     driver: ProviderDriverKind.make(driver),
     continuation: { groupKey },
     slashCommands: (overrides.slashCommands ?? ["compact"]).map((name) => ({ name })),
   })) as unknown as ReadonlyArray<ServerProvider>;
+  const isAntigravity = source === antigravity;
+  const usedTokens = overrides.usedTokens ?? 293_611;
   const providerThread = (id: string) => ({
     id: ProviderThreadId.make(id),
     driver: providers.find((provider) => provider.instanceId === source)!.driver,
     providerInstanceId: source,
-    contextUsage: null,
+    contextUsage:
+      isAntigravity && id === "provider-thread-current"
+        ? { usedTokens, maxTokens: 1_048_576 }
+        : null,
     updatedAt: DateTime.makeUnsafe(lastTurnAt),
   });
   const visibleTurnItems =
@@ -93,22 +101,24 @@ function sendInput(
       providerThread("provider-thread-earlier"),
       providerThread("provider-thread-current"),
     ],
-    providerTurns: [
-      {
-        providerThreadId: ProviderThreadId.make(
-          overrides.onlyEarlierConversationUsage === true
-            ? "provider-thread-earlier"
-            : "provider-thread-current",
-        ),
-        tokenUsage: {
-          usedTokens: overrides.usedTokens ?? 293_611,
-          updatedAt: lastTurnAt,
-          ...(overrides.promptCacheTtlMs === undefined
-            ? {}
-            : { promptCacheTtlMs: overrides.promptCacheTtlMs }),
-        },
-      },
-    ],
+    providerTurns: isAntigravity
+      ? []
+      : [
+          {
+            providerThreadId: ProviderThreadId.make(
+              overrides.onlyEarlierConversationUsage === true
+                ? "provider-thread-earlier"
+                : "provider-thread-current",
+            ),
+            tokenUsage: {
+              usedTokens,
+              updatedAt: lastTurnAt,
+              ...(overrides.promptCacheTtlMs === undefined
+                ? {}
+                : { promptCacheTtlMs: overrides.promptCacheTtlMs }),
+            },
+          },
+        ],
     runs: [
       {
         id: RunId.make("run-1"),
@@ -171,7 +181,12 @@ function sendInput(
     visibleTurnItems: visibleTurnItems as never,
     selection: {
       instanceId: selected,
-      model: selected === codex ? "gpt-5.4" : "claude-opus-4-6",
+      model:
+        selected === codex
+          ? "gpt-5.4"
+          : selected === antigravity
+            ? "gemini-4-neon"
+            : "claude-opus-4-6",
     },
     providers,
     settings: { ...DEFAULT_SERVER_SETTINGS, ...overrides.settings },
@@ -256,9 +271,78 @@ describe("compactBeforeSendTokens", () => {
     { name: "while the thread is working", threadIdle: false, expected: false },
     { name: "with no conversation but /compact", onlyCompactMessages: true, expected: false },
     { name: "for a typed /compact", text: "/compact keep the plan", expected: false },
+    {
+      name: "on a stale Antigravity thread over 200K after 5m idle",
+      source: antigravity,
+      selected: antigravity,
+      now: "2026-10-30T14:28:02.000Z",
+      expected: true,
+    },
+    {
+      name: "on an Antigravity thread within 5m idle",
+      source: antigravity,
+      selected: antigravity,
+      now: "2026-10-30T14:27:00.000Z",
+      expected: false,
+    },
+    {
+      name: "on a stale Antigravity thread over a custom threshold",
+      source: antigravity,
+      selected: antigravity,
+      usedTokens: 120_000,
+      now: "2026-10-30T14:28:02.000Z",
+      settings: {
+        providerInstances: {
+          [antigravity]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            config: { idleCompactionThreshold: "100000" },
+          },
+        },
+      },
+      expected: 120_000,
+    },
+    {
+      name: "on a stale Antigravity thread below a custom threshold",
+      source: antigravity,
+      selected: antigravity,
+      now: "2026-10-30T14:28:02.000Z",
+      settings: {
+        providerInstances: {
+          [antigravity]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            config: { idleCompactionThreshold: "300000" },
+          },
+        },
+      },
+      expected: false,
+    },
+    {
+      name: "on a stale Antigravity thread with idle compaction overridden to off",
+      source: antigravity,
+      selected: antigravity,
+      now: "2026-10-30T14:28:02.000Z",
+      settings: {
+        idleCompaction: "onReturn",
+        providerInstances: {
+          [antigravity]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            config: { idleCompaction: "off" },
+          },
+        },
+      },
+      expected: false,
+    },
+    {
+      name: "on a stale Antigravity thread without /compact advertised",
+      source: antigravity,
+      selected: antigravity,
+      slashCommands: [],
+      now: "2026-10-30T14:28:02.000Z",
+      expected: false,
+    },
   ] as const)("$name", ({ name: _name, expected, ...overrides }) => {
     expect(compactBeforeSendTokens(sendInput(overrides as Parameters<typeof sendInput>[0]))).toBe(
-      expected ? 293_611 : null,
+      typeof expected === "number" ? expected : expected ? 293_611 : null,
     );
   });
 });

@@ -162,6 +162,18 @@ const PACKAGE_FIELD_TEXT: ReadonlyMap<string, string> = new Map([
     ),
   ],
   [
+    "Compact idle or returning threads above this token count (50,000 to 1,000,000). Leave empty for 200,000.",
+    msg(
+      "Compact idle or returning threads above this token count (50,000 to 1,000,000). Leave empty for 200,000.",
+    ),
+  ],
+  [
+    "When to compact an idle thread over the token threshold: after you return, between jobs while the cache is warm, or never. Overrides the default in Providers > Advanced.",
+    msg(
+      "When to compact an idle thread over the token threshold: after you return, between jobs while the cache is warm, or never. Overrides the default in Providers > Advanced.",
+    ),
+  ],
+  [
     "Google accounts use your subscription; API keys and Agent Platform bill usage.",
     msg("Google accounts use your subscription; API keys and Agent Platform bill usage."),
   ],

@@ -10,6 +10,11 @@ const MIN_CONTEXT_TOKENS = COMPACTION_SUGGESTION_MIN_TOKENS;
 // Start this long before the cache expires: enough for the session to resume
 // and send the compaction while the cache is still warm.
 const LEAD_MS = 2 * 60_000;
+// Antigravity ACP does not report an explicit prompt-cache TTL and Gemini's
+// implicit cache cools quickly, so compact shortly after a turn settles
+// (between jobs) while the cache is still hot.
+export const ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS = 30_000;
+const ANTIGRAVITY_IDLE_COMPACTION_MAX_AGE_MS = 10 * 60_000;
 
 export type IdleCompactionRecords = Pick<
   OrchestrationV2ThreadProjection,
@@ -24,10 +29,10 @@ export type IdleCompactionRecords = Pick<
 >;
 
 /**
- * When an idle Claude thread should compact, or null when it should not. The
- * window ends when the prompt cache of Claude's last request expires (1h on
- * subscriptions, 5m on API keys); compacting after that pays a full uncached
- * read.
+ * When an idle Claude or Antigravity thread should compact, or null when it
+ * should not. Claude waits until shortly before its reported prompt cache
+ * expires (1h on subscriptions, 5m on API keys); Antigravity compacts after a
+ * short debounce between jobs while Gemini's implicit cache is still warm.
  */
 export function idleCompactionWindow(
   {
@@ -41,6 +46,7 @@ export function idleCompactionWindow(
     contextTransfers,
   }: IdleCompactionRecords,
   nowMs: number,
+  options?: { readonly minTokens?: number },
 ): {
   readonly runId: (typeof runs)[number]["id"];
   readonly startMs: number;
@@ -87,9 +93,10 @@ export function idleCompactionWindow(
   const providerThread = providerThreads.find(
     (candidate) => candidate.id === thread.activeProviderThreadId,
   );
-  // The thread's current selection receives the /compact, so it must still be this Claude session.
+  const minTokens = options?.minTokens ?? MIN_CONTEXT_TOKENS;
+  // The thread's current selection receives the /compact, so it must still be this session.
   if (
-    providerThread?.driver !== "claudeAgent" ||
+    (providerThread?.driver !== "claudeAgent" && providerThread?.driver !== "antigravity") ||
     providerThread.id !== latestRun.providerThreadId ||
     providerThread.providerInstanceId !== thread.providerInstanceId ||
     latestRun.providerInstanceId !== thread.providerInstanceId
@@ -99,7 +106,16 @@ export function idleCompactionWindow(
     .filter((turn) => turn.providerThreadId === providerThread.id && turn.tokenUsage !== undefined)
     .map((turn) => turn.tokenUsage!)
     .toSorted((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-  if ((usages[0]?.usedTokens ?? 0) < MIN_CONTEXT_TOKENS) return null;
+  if (providerThread.driver === "antigravity") {
+    const usedTokens = providerThread.contextUsage?.usedTokens ?? usages[0]?.usedTokens ?? 0;
+    if (usedTokens < minTokens) return null;
+    const completedAtMs = DateTime.toEpochMillis(latestRun.completedAt);
+    const startMs = completedAtMs + ANTIGRAVITY_IDLE_COMPACTION_DELAY_MS;
+    const endMs = completedAtMs + ANTIGRAVITY_IDLE_COMPACTION_MAX_AGE_MS;
+    if (nowMs >= endMs) return null;
+    return { runId: latestRun.id, startMs, endMs };
+  }
+  if ((usages[0]?.usedTokens ?? 0) < minTokens) return null;
   // A request served fully from cache creates no cache entry and reports no
   // TTL, but it still refreshes the cache. Treat it as unknown and skip.
   const expiresAt = usages[0]?.promptCacheExpiresAt;
